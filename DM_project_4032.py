@@ -42,12 +42,10 @@ target_image = None
 wall_image = None
 victory_image = None
 
-# Directions (orthogonal only)
+# Orthogonal directions
 DIRS = [(1,0),(-1,0),(0,1),(0,-1)]
 
-# Path caches for each algorithm.
-# dfs/bfs/astar: {'path': List[(r,c)] or None, 'idx': int, 'goal': (r,c) or None}
-# bidi: {'path': List[(r,c)] or None, 's_idx': int, 'e_idx': int, 'goal': (r,c) or None}
+# Path caches
 path_caches = {
     'dfs': {'path': None, 'idx': 0, 'goal': None},
     'bfs': {'path': None, 'idx': 0, 'goal': None},
@@ -55,28 +53,30 @@ path_caches = {
     'bidi': {'path': None, 's_idx': 0, 'e_idx': -1, 'goal': None},
 }
 
-#########
-######### Pathfinding helper functions
-#########
-
+# --- helpers ---------------------------------------------------------------
 def in_bounds(pos: Tuple[int,int]) -> bool:
     r,c = pos
     return 0 <= r < ROWS and 0 <= c < COLS
 
+def neighbors(g: List[List[CellState]], pos: Tuple[int,int]):
+    for dr, dc in DIRS:
+        nr, nc = pos[0] + dr, pos[1] + dc
+        if in_bounds((nr,nc)) and g[nr][nc] != CellState.WALL:
+            yield (nr, nc)
+
 def reconstruct_parent(parent: Dict[Tuple[int,int], Tuple[int,int]], start: Tuple[int,int], goal: Tuple[int,int]) -> List[Tuple[int,int]]:
     path = []
     cur = goal
-    # Walk back until start (inclusive)
     while cur != start:
         path.append(cur)
         cur = parent.get(cur)
         if cur is None:
-            # parent chain broken
             return []
     path.append(start)
     path.reverse()
     return path
 
+# --- path finders ---------------------------------------------------------
 def bfs_path(g: List[List[CellState]], start: Tuple[int,int], goal: Tuple[int,int]) -> Optional[List[Tuple[int,int]]]:
     if start == goal:
         return [start]
@@ -85,27 +85,22 @@ def bfs_path(g: List[List[CellState]], start: Tuple[int,int], goal: Tuple[int,in
     parent: Dict[Tuple[int,int], Tuple[int,int]] = {}
     while q:
         u = q.popleft()
-        for dr,dc in DIRS:
-            v = (u[0]+dr, u[1]+dc)
-            if not in_bounds(v):
-                continue
+        for v in neighbors(g, u):
             if v in visited:
                 continue
-            if g[v[0]][v[1]] == CellState.WALL:
-                continue
+            visited.add(v)
             parent[v] = u
             if v == goal:
                 return reconstruct_parent(parent, start, goal)
-            visited.add(v)
             q.append(v)
     return None
 
 def dfs_path(g: List[List[CellState]], start: Tuple[int,int], goal: Tuple[int,int]) -> Optional[List[Tuple[int,int]]]:
-    # Recursive DFS that records parent links and stops once goal is found.
+    if start == goal:
+        return [start]
     visited = set()
     parent: Dict[Tuple[int,int], Tuple[int,int]] = {}
     found = False
-
     def dfs(u: Tuple[int,int]):
         nonlocal found
         if found:
@@ -114,19 +109,13 @@ def dfs_path(g: List[List[CellState]], start: Tuple[int,int], goal: Tuple[int,in
             found = True
             return
         visited.add(u)
-        for dr,dc in DIRS:
-            v = (u[0]+dr, u[1]+dc)
-            if not in_bounds(v) or v in visited:
-                continue
-            if g[v[0]][v[1]] == CellState.WALL:
+        for v in neighbors(g, u):
+            if v in visited:
                 continue
             parent[v] = u
             dfs(v)
             if found:
                 return
-
-    if start == goal:
-        return [start]
     dfs(start)
     if not found:
         return None
@@ -138,8 +127,8 @@ def manhattan(a: Tuple[int,int], b: Tuple[int,int]) -> int:
 def astar_path(g: List[List[CellState]], start: Tuple[int,int], goal: Tuple[int,int]) -> Optional[List[Tuple[int,int]]]:
     if start == goal:
         return [start]
-    open_heap = []  # entries: (f, gscore, node)
-    heapq.heappush(open_heap, (manhattan(start, goal), 0, start))
+    open_heap = []  # (f, g, node)
+    heapq.heappush(open_heap, (manhattan(start,goal), 0, start))
     g_score: Dict[Tuple[int,int], int] = {start: 0}
     parent: Dict[Tuple[int,int], Tuple[int,int]] = {}
     closed = set()
@@ -150,37 +139,36 @@ def astar_path(g: List[List[CellState]], start: Tuple[int,int], goal: Tuple[int,
         if u == goal:
             return reconstruct_parent(parent, start, goal)
         closed.add(u)
-        for dr,dc in DIRS:
-            v = (u[0]+dr, u[1]+dc)
-            if not in_bounds(v):
-                continue
-            if g[v[0]][v[1]] == CellState.WALL:
-                continue
+        for v in neighbors(g, u):
             tentative = g_score.get(u, 10**9) + 1
             if tentative < g_score.get(v, 10**9):
                 g_score[v] = tentative
                 parent[v] = u
-                heapq.heappush(open_heap, (tentative + manhattan(v, goal), tentative, v))
+                heapq.heappush(open_heap, (tentative + manhattan(v,goal), tentative, v))
     return None
 
 def bidirectional_bfs_path(g: List[List[CellState]], start: Tuple[int,int], goal: Tuple[int,int]) -> Optional[List[Tuple[int,int]]]:
-    # Bidirectional BFS that returns a full path start -> goal if exists
+    """
+    Safe bidirectional BFS path finder.
+    Returns a list of cells from start to goal if path exists, else None.
+    """
     if start == goal:
         return [start]
+
     qf = deque([start])
     qb = deque([goal])
-    pf: Dict[Tuple[int,int], Tuple[int,int]] = {}  # forward parent (child -> parent)
-    pb: Dict[Tuple[int,int], Tuple[int,int]] = {}  # backward parent (child -> parent)
+    pf: Dict[Tuple[int,int], Optional[Tuple[int,int]]] = {start: None}
+    pb: Dict[Tuple[int,int], Optional[Tuple[int,int]]] = {goal: None}
     vf = {start}
     vb = {goal}
     meeting = None
-    while qf and qb:
+
+    while qf and qb and meeting is None:
         # expand forward one layer
         for _ in range(len(qf)):
             u = qf.popleft()
-            for dr,dc in DIRS:
-                v = (u[0]+dr, u[1]+dc)
-                if not in_bounds(v) or g[v[0]][v[1]] == CellState.WALL or v in vf:
+            for v in neighbors(g, u):
+                if v in vf:
                     continue
                 pf[v] = u
                 vf.add(v)
@@ -195,9 +183,8 @@ def bidirectional_bfs_path(g: List[List[CellState]], start: Tuple[int,int], goal
         # expand backward one layer
         for _ in range(len(qb)):
             u = qb.popleft()
-            for dr,dc in DIRS:
-                v = (u[0]+dr, u[1]+dc)
-                if not in_bounds(v) or g[v[0]][v[1]] == CellState.WALL or v in vb:
+            for v in neighbors(g, u):
+                if v in vb:
                     continue
                 pb[v] = u
                 vb.add(v)
@@ -207,53 +194,44 @@ def bidirectional_bfs_path(g: List[List[CellState]], start: Tuple[int,int], goal
                     break
             if meeting:
                 break
-        if meeting:
-            break
 
-    if not meeting:
+    if meeting is None:
         return None
 
-    # Reconstruct path: start -> meeting (using pf), meeting -> goal (using pb)
-    # Build forward part: start ... meeting
+    # Reconstruct forward part: start -> meeting
     forward = []
     cur = meeting
-    while cur != start:
+    while cur is not None:
         forward.append(cur)
         cur = pf.get(cur)
-        if cur is None:
-            break
-    forward.append(start)
-    forward.reverse()
+    forward.reverse()  # now start ... meeting
 
-    # Build backward part: meeting -> goal
+    # Reconstruct backward part: meeting -> goal (excluding meeting)
     backward = []
     cur = meeting
-    while cur != goal:
-        cur = pb.get(cur)
-        if cur is None:
+    while True:
+        nxt = pb.get(cur)
+        if nxt is None:
             break
-        backward.append(cur)
+        backward.append(nxt)
+        cur = nxt
 
     full = forward + backward
-    # sanity check: must start with start and end with goal
+    # sanity
     if not full or full[0] != start or full[-1] != goal:
         return None
     return full
 
-#########
-######### TODO FUNCTIONS (completed)
-#########
-
+# --- TODO functions (implemented) -----------------------------------------
 def _ensure_path_and_sync(cache_key: str, compute_fn, player_pos: Tuple[int,int], target_pos: Tuple[int,int]):
     """
-    Helper to ensure cache has a path for the algorithm identified by cache_key.
-    compute_fn should be function(g, start, goal) -> Optional[path].
-    Returns (path, idx) where idx is the index in path corresponding to player_pos.
+    Ensure path exists in cache and sync index with player_pos.
+    Returns (path, idx) or (None, None) if no path.
     """
     cache = path_caches[cache_key]
     path = cache.get('path')
-    # Recompute if no path yet or target changed or cached path exhausted
-    if path is None or cache.get('goal') != target_pos or (isinstance(cache.get('idx', None), int) and path is not None and cache.get('idx',0) >= len(path)-1):
+    # recompute if no path or goal changed
+    if path is None or cache.get('goal') != target_pos:
         path = compute_fn(grid, player_pos, target_pos)
         cache['path'] = path
         cache['idx'] = 0
@@ -261,14 +239,16 @@ def _ensure_path_and_sync(cache_key: str, compute_fn, player_pos: Tuple[int,int]
         if path is None:
             return None, None
     else:
-        # path exists: try to sync idx with actual player_pos
+        # sync index if needed
         idx = cache.get('idx', 0)
-        # If current player_pos is not equal to path[idx], try to find it in path
-        if path and (idx < 0 or idx >= len(path) or path[idx] != player_pos):
+        if not path:
+            return None, None
+        if idx < 0 or idx >= len(path) or path[idx] != player_pos:
+            # try find player's index
             try:
                 idx = path.index(player_pos)
             except ValueError:
-                # player's position not in path -> recompute from current player_pos
+                # recompute from current player_pos
                 path = compute_fn(grid, player_pos, target_pos)
                 cache['path'] = path
                 cache['idx'] = 0
@@ -279,11 +259,10 @@ def _ensure_path_and_sync(cache_key: str, compute_fn, player_pos: Tuple[int,int]
         cache['idx'] = idx
     return cache['path'], cache['idx']
 
-def dfs_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int, int], target_pos: Tuple[int, int]) -> Tuple[int, int]:
-    # full-path-first DFS (not necessarily shortest) then step-by-step
+def dfs_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int,int], target_pos: Tuple[int,int]) -> Tuple[int,int]:
     path, idx = _ensure_path_and_sync('dfs', dfs_path, player_pos, target_pos)
     if path is None:
-        print("DFS: No path found; staying in place.")
+        print("DFS: no path")
         return player_pos
     if len(path) <= 1:
         return player_pos
@@ -291,10 +270,10 @@ def dfs_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int, int]
     path_caches['dfs']['idx'] = next_idx
     return path[next_idx]
 
-def bfs_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int, int], target_pos: Tuple[int, int]) -> Tuple[int, int]:
+def bfs_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int,int], target_pos: Tuple[int,int]) -> Tuple[int,int]:
     path, idx = _ensure_path_and_sync('bfs', bfs_path, player_pos, target_pos)
     if path is None:
-        print("BFS: No path found; staying in place.")
+        print("BFS: no path")
         return player_pos
     if len(path) <= 1:
         return player_pos
@@ -302,10 +281,10 @@ def bfs_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int, int]
     path_caches['bfs']['idx'] = next_idx
     return path[next_idx]
 
-def a_star_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int, int], target_pos: Tuple[int, int]) -> Tuple[int, int]:
+def a_star_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int,int], target_pos: Tuple[int,int]) -> Tuple[int,int]:
     path, idx = _ensure_path_and_sync('astar', astar_path, player_pos, target_pos)
     if path is None:
-        print("A*: No path found; staying in place.")
+        print("A*: no path")
         return player_pos
     if len(path) <= 1:
         return player_pos
@@ -313,51 +292,45 @@ def a_star_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int, i
     path_caches['astar']['idx'] = next_idx
     return path[next_idx]
 
-def bidi_a_star_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int, int], target_pos: Tuple[int, int]) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+def bidi_a_star_make_move(grid_param: List[List[CellState]], player_pos: Tuple[int,int], target_pos: Tuple[int,int]) -> Tuple[Tuple[int,int], Tuple[int,int]]:
+    """
+    Bidirectional step: moves player forward and target backward along full shortest path.
+    When they meet or cross we return the meeting cell for both and clear the cache
+    so the next frame a new path/search will be started.
+    """
     cache = path_caches['bidi']
     path = cache.get('path')
-    # Recompute path if needed (no path, goal changed, or indices crossed/exhausted)
-    recompute = False
+    # If players already at same cell -> trigger reset (main loop shows victory and re-init)
+    if player_pos == target_pos:
+        cache['path'] = None
+        return player_pos, target_pos
+
+    # compute path if needed
     if path is None or cache.get('goal') != target_pos:
-        recompute = True
-    else:
-        s_idx = cache.get('s_idx', 0)
-        e_idx = cache.get('e_idx', -1)
-        if path is None or s_idx >= e_idx:
-            recompute = True
-    if recompute:
         path = bidirectional_bfs_path(grid_param, player_pos, target_pos)
-        if path is None:
-            cache['path'] = None
-            cache['s_idx'] = 0
-            cache['e_idx'] = -1
-            cache['goal'] = target_pos
-            print("Bidirectional: No path found; staying in place.")
-            return player_pos, target_pos
         cache['path'] = path
         cache['s_idx'] = 0
-        cache['e_idx'] = len(path)-1
+        cache['e_idx'] = (len(path)-1) if path else -1
         cache['goal'] = target_pos
+        if path is None:
+            print("Bidirectional: no path")
+            return player_pos, target_pos
 
-    # Sync current player/target positions to indices if necessary
-    path = cache['path']
-    s_idx = cache['s_idx']
-    e_idx = cache['e_idx']
-    # If out of sync, try to find indices of player_pos and target_pos in the path
+    # ensure indices in-range and synced with actual positions
+    s_idx = cache.get('s_idx', 0)
+    e_idx = cache.get('e_idx', len(path)-1)
+    # try to find player's index
     try:
         if path[s_idx] != player_pos:
             s_idx = path.index(player_pos)
     except (ValueError, IndexError):
-        # not found -> recompute path from current player/target
+        # recompute path from current positions
         path = bidirectional_bfs_path(grid_param, player_pos, target_pos)
+        cache['path'] = path
         if path is None:
-            cache['path'] = None
             cache['s_idx'] = 0
             cache['e_idx'] = -1
-            cache['goal'] = target_pos
-            print("Bidirectional (resync): No path found; staying in place.")
             return player_pos, target_pos
-        cache['path'] = path
         s_idx = 0
         e_idx = len(path)-1
 
@@ -365,35 +338,47 @@ def bidi_a_star_make_move(grid_param: List[List[CellState]], player_pos: Tuple[i
         if path[e_idx] != target_pos:
             e_idx = path.index(target_pos)
     except (ValueError, IndexError):
-        # not found -> recompute similarly
         path = bidirectional_bfs_path(grid_param, player_pos, target_pos)
+        cache['path'] = path
         if path is None:
-            cache['path'] = None
             cache['s_idx'] = 0
             cache['e_idx'] = -1
-            cache['goal'] = target_pos
-            print("Bidirectional (resync2): No path found; staying in place.")
             return player_pos, target_pos
-        cache['path'] = path
         s_idx = 0
         e_idx = len(path)-1
 
-    # If s_idx >= e_idx they met — return meeting cell
+    # If already met or crossed -> produce meeting and reset
     if s_idx >= e_idx:
         meet = path[s_idx]
-        cache['s_idx'] = s_idx
-        cache['e_idx'] = e_idx
+        cache['path'] = None
+        cache['s_idx'] = 0
+        cache['e_idx'] = -1
         return meet, meet
 
-    # Move player forward one, target backward one
-    new_s_idx = min(s_idx + 1, e_idx)
-    new_e_idx = max(e_idx - 1, s_idx)
-    new_player_pos = path[new_s_idx]
-    new_target_pos = path[new_e_idx]
+    # compute next indices and check if next move will meet/cross
+    new_s_idx = s_idx + 1
+    new_e_idx = e_idx - 1
+
+    # if after moving they would be at the same cell or cross, return meeting and reset cache
+    if new_s_idx >= new_e_idx:
+        # choose meeting index: prefer new_s_idx if within bounds, else e_idx
+        if 0 <= new_s_idx < len(path):
+            meet_idx = new_s_idx
+        else:
+            meet_idx = e_idx
+        meet = path[meet_idx]
+        cache['path'] = None
+        cache['s_idx'] = 0
+        cache['e_idx'] = -1
+        return meet, meet
+
+    # otherwise advance
     cache['s_idx'] = new_s_idx
     cache['e_idx'] = new_e_idx
-    return new_player_pos, new_target_pos
+    return path[new_s_idx], path[new_e_idx]
 
+# move functions array
+move_funcs = [dfs_make_move, bfs_make_move, a_star_make_move]
 #########
 #########
 #########
